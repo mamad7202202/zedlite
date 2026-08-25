@@ -27,7 +27,7 @@ impl TokenKind {
         }
     }
 
-    pub fn rgb(self) -> gpui::Rgb {
+    pub fn rgb(self) -> gpui::Rgba {
         rgb(self.color())
     }
 }
@@ -75,7 +75,7 @@ pub struct Token {
 pub fn tokenize(line: &str) -> Vec<Token> {
     let chars: Vec<char> = line.chars().collect();
     let mut tokens = Vec::new();
-    let byte_index_of = |char_ix: usize| -> usize { chars[..char_ix].iter().map(char::len_utf8).sum() };
+    let byte_index_of = |char_ix: usize| -> usize { chars[..char_ix].iter().map(|c| c.len_utf8()).sum() };
 
     let mut i = 0usize;
     while i < chars.len() {

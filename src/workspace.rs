@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable, InteractiveElement,
-    KeyBinding, MouseButton, PathPromptOptions, Render, SharedString, Styled,
+    KeyBinding, MouseButton, PathPromptOptions, Render, SharedString, Styled, Window,
 };
 
 use crate::document::Document;
 use crate::editor::EditorPane;
+use crate::syntax;
 use crate::theme::{hex, SIDEBAR_WIDTH, Theme};
 
 actions!(
@@ -135,7 +136,7 @@ impl Workspace {
 
         match startup_path {
             Some(path) if path.is_dir() => {
-                workspace.open_folder_at(path, cx);
+                workspace.open_folder_at(path.clone(), cx);
                 let seed = path.join("src").join("main.rs");
                 if seed.is_file() {
                     workspace.open_file_in(&seed, cx);
@@ -299,6 +300,7 @@ impl Workspace {
             files: !directories,
             directories,
             multiple: !directories,
+            prompt: None,
         });
         cx.spawn(async move |this, cx| {
             let picked = receiver
@@ -438,7 +440,7 @@ impl Workspace {
             sidebar = sidebar.child(
                 div()
                     .flex_1()
-                    .overflow_y_scroll()
+                    .overflow_scroll()
                     .child(render_tree_node(&root_clone, 0, workspace)),
             );
         } else {
@@ -463,7 +465,7 @@ impl Workspace {
             .px_2()
             .h(px(34.0))
             .flex_none()
-            .overflow_x_scroll()
+            .overflow_hidden()
             .bg(hex(Theme::PANEL))
             .border_b_1()
             .border_color(hex(Theme::PANEL_BORDER));

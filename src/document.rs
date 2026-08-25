@@ -214,9 +214,8 @@ impl Document {
     }
 
     fn split_line_internal(&mut self) {
-        let rest = self.lines[self.cursor.row].split_off(self.cursor.col.min(
-            self.lines[self.cursor.row].len(),
-        ));
+        let col = self.cursor.col.min(self.lines[self.cursor.row].len());
+        let rest = self.lines[self.cursor.row].split_off(col);
         self.cursor.row += 1;
         self.cursor.col = 0;
         self.goal_col = 0;
