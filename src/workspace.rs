@@ -439,6 +439,7 @@ impl Workspace {
             let root_clone = root.clone();
             sidebar = sidebar.child(
                 div()
+                    .id("tree-scroll")
                     .flex_1()
                     .overflow_scroll()
                     .child(render_tree_node(&root_clone, 0, workspace)),
