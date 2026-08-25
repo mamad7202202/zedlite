@@ -409,8 +409,11 @@ impl Workspace {
                 }
             });
         let new_btn = toolbar_button("btn-new", "New")
-            .on_mouse_down(MouseButton::Left, move |_, _, cx: &mut App| {
-                workspace.update(cx, |ws, cx| ws.new_file(cx));
+            .on_mouse_down(MouseButton::Left, {
+                let workspace = workspace.clone();
+                move |_, _, cx: &mut App| {
+                    workspace.update(cx, |ws, cx| ws.new_file(cx));
+                }
             });
 
         sidebar = sidebar.child(
