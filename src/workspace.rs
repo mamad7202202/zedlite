@@ -1,14 +1,19 @@
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{
     actions, div, prelude::*, px, App, Context, ElementId, Entity, Focusable, InteractiveElement,
     KeyBinding, MouseButton, PathPromptOptions, Render, SharedString, Styled, Window,
 };
 
+use crate::ai::{self, AiHub, UiEvent};
 use crate::document::Document;
 use crate::editor::EditorPane;
+use crate::panels::chat::{ChatPanel, AI_PANEL_W};
+use crate::panels::memoryview::MemoryPanel;
+use crate::panels::terminal::TerminalPanel;
 use crate::syntax;
 use crate::theme::{hex, SIDEBAR_WIDTH, Theme};
 
@@ -23,6 +28,12 @@ actions!(
         CloseActiveTab,
         NextTab,
         PrevTab,
+        ToggleAi,
+        ToggleTerminal,
+        ToggleMemory,
+        OpenSettings,
+        NewSession,
+        StopAi,
     ]
 );
 
@@ -42,6 +53,13 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseActiveTab, None),
         KeyBinding::new("ctrl-pagedown", NextTab, None),
         KeyBinding::new("ctrl-pageup", PrevTab, None),
+        // panel toggles & AI commands
+        KeyBinding::new("alt-a", ToggleAi, None),
+        KeyBinding::new("alt-t", ToggleTerminal, None),
+        KeyBinding::new("alt-m", ToggleMemory, None),
+        KeyBinding::new("alt-c", OpenSettings, None),
+        KeyBinding::new("alt-n", NewSession, None),
+        KeyBinding::new("alt-q", StopAi, None),
     ]);
 }
 
@@ -121,17 +139,41 @@ pub struct Workspace {
     active_pane: usize,
     status_message: String,
     focus_handle: gpui::FocusHandle,
+    // ------------------------------------------------------------- AI stack
+    pub hub: Arc<AiHub>,
+    /// Shared channel every async producer (agent, terminal, inline suggest)
+    /// streams results into; drained by the pump task in main.rs.
+    pub ai_tx: futures::channel::mpsc::UnboundedSender<UiEvent>,
+    pub chat: ChatPanel,
+    pub term: TerminalPanel,
+    pub mem: MemoryPanel,
+    pub show_ai: bool,
+    pub show_term: bool,
+    pub show_mem: bool,
 }
 
 impl Workspace {
-    pub fn new(startup_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        startup_path: Option<PathBuf>,
+        hub: Arc<AiHub>,
+        ai_tx: futures::channel::mpsc::UnboundedSender<UiEvent>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut workspace = Workspace {
             root: None,
             panes: Vec::new(),
             active_pane: 0,
-            status_message: "Ctrl+O open · Ctrl+Shift+O folder · Ctrl+N new · Ctrl+S save"
+            status_message: "Ctrl+O open · Ctrl+Shift+O folder · Alt+A AI · Alt+T terminal"
                 .to_string(),
             focus_handle: cx.focus_handle(),
+            hub: hub.clone(),
+            ai_tx,
+            chat: ChatPanel::new(cx),
+            term: TerminalPanel::new(cx),
+            mem: MemoryPanel::new(),
+            show_ai: true,
+            show_term: false,
+            show_mem: false,
         };
 
         match startup_path {
@@ -144,7 +186,7 @@ impl Workspace {
             }
             Some(path) => workspace.open_file_in(&path, cx),
             None => {
-                let pane = make_editor(None, cx);
+                let pane = make_editor(None, &hub, workspace.ai_tx.clone(), cx);
                 workspace.panes.push(pane);
             }
         }
@@ -166,6 +208,7 @@ impl Workspace {
         node.expanded = true;
         node.load_children();
         self.root = Some(node);
+        self.hub.set_root(path.clone());
         self.status_message = format!("Folder: {}", path.display());
         cx.notify();
     }
@@ -188,11 +231,24 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let pane = make_editor(Some(path.to_path_buf()), cx);
+        let pane = make_editor(Some(path.to_path_buf()), &self.hub, self.ai_tx.clone(), cx);
         self.panes.push(pane);
         self.active_pane = self.panes.len() - 1;
         self.status_message = format!("Opened {}", path.display());
         cx.notify();
+    }
+
+    /// Open the live config.toml as an editable tab; saving it re-applies AI
+    /// settings (providers, model, proxy routing, memory engine...).
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let path = ai::config::Config::path();
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&path, ai::config::Config::template());
+        }
+        self.open_file_in(&path, cx);
     }
 
     fn handle_tree_click(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -243,12 +299,22 @@ impl Workspace {
         let has_path = pane.read(cx).doc.read(cx).path.is_some();
         if has_path {
             let name = pane.read(cx).doc.read(cx).display_name.clone();
+            let saved_path = pane.read(cx).doc.read(cx).path.clone();
             let outcome =
                 pane.update(cx, |pane, cx| pane.doc.update(cx, |doc, _| doc.save()));
-            self.status_message = match outcome {
+            self.status_message = match &outcome {
                 Ok(()) => format!("Saved {}", name),
                 Err(err) => format!("Save failed: {}", err),
             };
+            // Live-reload AI config when the user saves the config tab.
+            if outcome.is_ok()
+                && saved_path.as_deref() == Some(ai::config::Config::path().as_path())
+            {
+                match self.hub.reload_config() {
+                    Ok(summary) => self.status_message = summary,
+                    Err(e) => self.status_message = format!("config error: {e:#}"),
+                }
+            }
             cx.notify();
         } else {
             self.save_active_as(cx);
@@ -332,10 +398,17 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let status = self.status_message.clone();
         let active_pane = self.active_pane_entity();
+        let show_ai = self.show_ai;
+        let show_mem = self.show_mem && !self.show_ai;
+        let show_term = self.show_term;
+
+        let hub_for_actions = self.hub.clone();
+        let hub_session = self.hub.clone();
+        let hub_stop = self.hub.clone();
 
         div()
             .id("workspace")
@@ -353,6 +426,42 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CloseActiveTab, _, cx| this.close_active_tab(cx)))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, _, cx| this.cycle_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &ToggleAi, _, cx| {
+                this.show_ai = !this.show_ai;
+                if this.show_ai {
+                    this.show_mem = false;
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, _, cx| {
+                this.show_term = !this.show_term;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMemory, _, cx| {
+                this.show_mem = !this.show_mem;
+                if this.show_mem {
+                    this.show_ai = false;
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(cx)))
+            .on_action(cx.listener(move |this, _: &NewSession, _, cx| {
+                let _ = hub_session.new_session();
+                this.chat.msgs.push(crate::panels::chat::ChatMsg::System(
+                    "— new session started —".into(),
+                ));
+                this.chat.tasks.clear();
+                this.chat.pending = None;
+                this.chat.streaming.clear();
+                this.status_message = "new AI session".into();
+                cx.notify();
+            }))
+            .on_action(move |_: &StopAi, _, _| {
+                hub_stop.stop();
+            })
+            // ---- toolbar ---------------------------------------------------
+            .child(self.render_toolbar(hub_for_actions, entity.clone(), window, cx))
+            // ---- main area --------------------------------------------------
             .child(
                 div()
                     .flex_1()
@@ -367,16 +476,170 @@ impl Render for Workspace {
                             .overflow_hidden()
                             .child(self.render_tab_bar(cx))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .when_some(active_pane, |el, pane| el.child(pane)),
-                            ),
-                    ),
+                                div().flex_1().overflow_hidden().when_some(
+                                    active_pane,
+                                    |el, pane| el.child(pane),
+                                ),
+                            )
+                            .children(show_term.then(|| {
+                                self.render_terminal_panel(self.hub.clone(), window, cx)
+                            })),
+                    )
+                    .when(show_ai || show_mem, |el| {
+                        if show_ai {
+                            el.child(self.render_chat_panel(self.hub.clone(), window, cx))
+                        } else {
+                            el.child(self.render_memory_panel(self.hub.clone(), window, cx))
+                        }
+                    }),
             )
             .child(self.render_status_bar(status, cx))
     }
+
+    fn render_toolbar(
+        &mut self,
+        hub: Arc<AiHub>,
+        ws: Entity<Self>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let busy = hub.busy();
+        let mut bar = div()
+            .id("toolbar")
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .h(px(32.0))
+            .flex_none()
+            .bg(hex(Theme::PANEL))
+            .border_b_1()
+            .border_color(hex(Theme::PANEL_BORDER));
+
+        let folder_ws = ws.clone();
+        let files_ws = ws.clone();
+        let new_ws = ws.clone();
+        let save_ws = ws.clone();
+        let term_ws = ws.clone();
+        let mem_ws = ws.clone();
+        let cfg_ws = ws.clone();
+        let toggle_ws = ws;
+
+        bar = bar
+            .child(tool_btn("tb-folder", "Folder", move |ws, cx| {
+                ws.prompt_open(true, cx)
+            }, folder_ws))
+            .child(tool_btn("tb-files", "Files", move |ws, cx| {
+                ws.prompt_open(false, cx)
+            }, files_ws))
+            .child(tool_btn("tb-new", "New", move |ws, cx| ws.new_file(cx), new_ws))
+            .child(tool_btn("tb-save", "Save", move |ws, cx| ws.save_active(cx), save_ws))
+            .child(div().flex_1())
+            .child(if busy {
+                div()
+                    .text_size(px(11.0))
+                    .text_color(hex(Theme::YELLOW))
+                    .child("AI busy")
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
+            .child({
+                let stop_hub = hub.clone();
+                pill_tb("tb-stop", "Stop AI", false).on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    stop_hub.stop();
+                })
+            })
+            .child({
+                let sess_ws = toggle_ws.clone();
+                pill_tb("tb-newchat", "+ Chat", false).on_mouse_down(MouseButton::Left, move |_, _, app| {
+                    let _ = sess_ws.update(app, |ws, cx| {
+                        let _ = ws.hub.new_session();
+                        ws.chat.msgs.push(crate::panels::chat::ChatMsg::System(
+                            "— new session started —".into(),
+                        ));
+                        ws.chat.tasks.clear();
+                        ws.chat.pending = None;
+                        ws.chat.streaming.clear();
+                        cx.notify();
+                    });
+                })
+            })
+            .child(pill_tb("tb-ai", "Chat", self.show_ai).on_mouse_down(MouseButton::Left, {
+                move |_, _, app| {
+                    let _ = toggle_ws.update(app, |ws, cx| {
+                        ws.show_ai = !ws.show_ai;
+                        if ws.show_ai {
+                            ws.show_mem = false;
+                        }
+                        cx.notify();
+                    });
+                }
+            }))
+            .child(pill_tb("tb-term", "Terminal", self.show_term).on_mouse_down(MouseButton::Left, {
+                move |_, _, app| {
+                    let _ = term_ws.update(app, |ws, cx| {
+                        ws.show_term = !ws.show_term;
+                        cx.notify();
+                    });
+                }
+            }))
+            .child(pill_tb("tb-mem", "Memory", self.show_mem).on_mouse_down(MouseButton::Left, {
+                move |_, _, app| {
+                    let _ = mem_ws.update(app, |ws, cx| {
+                        ws.show_mem = !ws.show_mem;
+                        if ws.show_mem {
+                            ws.show_ai = false;
+                        }
+                        cx.notify();
+                    });
+                }
+            }))
+            .child(pill_tb("tb-cfg", "Settings", false).on_mouse_down(MouseButton::Left, move |_, _, app| {
+                let _ = cfg_ws.update(app, |ws, cx| ws.open_settings(cx));
+            }));
+        bar
+    }
 }
+
+/// Toolbar button that calls a workspace method on click.
+fn tool_btn<F>(id: &'static str, label: &'static str, f: F, ws: Entity<Workspace>) -> gpui::Stateful<gpui::Div>
+where
+    F: Fn(&mut Workspace, &mut Context<Workspace>) + 'static,
+{
+    div()
+        .id(id)
+        .px_2()
+        .py(px(3.0))
+        .rounded_sm()
+        .text_size(px(11.5))
+        .text_color(hex(Theme::TEXT_DIM))
+        .bg(hex(0x2a2f38))
+        .cursor_pointer()
+        .hover(|s| s.bg(hex(0x353b45)).text_color(hex(Theme::TEXT)))
+        .child(label)
+        .on_mouse_down(MouseButton::Left, move |_, _, app| {
+            let _ = ws.update(app, |ws, cx| f(ws, cx));
+        })
+}
+
+fn pill_tb(id: &'static str, label: &'static str, active: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .px_2()
+        .py(px(3.0))
+        .rounded_sm()
+        .text_size(px(11.0))
+        .cursor_pointer()
+        .text_color(if active { hex(Theme::BG) } else { hex(Theme::TEXT_DIM) })
+        .bg(if active { hex(Theme::ACCENT) } else { hex(0x2a2f38) })
+        .hover(|s| s.bg(hex(0x353b45)).text_color(hex(Theme::TEXT)))
+        .child(label)
+}
+
+/// Cross-thread request flags consumed by the pump in main.rs. Buttons live
+/// in closures without async contexts; flags keep the bridge trivial.
+pub const AI_PANEL_WIDTH: f32 = AI_PANEL_W;
 
 impl Workspace {
     fn render_sidebar(
@@ -535,6 +798,23 @@ impl Workspace {
             })
             .unwrap_or_else(|| ("—".to_string(), "Plain Text".to_string(), false));
 
+        let mode = self.hub.current_mode();
+        let busy = self.hub.busy();
+        let model = self.hub.model_label();
+        let proxy = {
+            let cfg = self.hub.cfg.lock().unwrap();
+            if cfg.settings.proxy_active() {
+                format!(
+                    "proxy[llm:{} web:{} fetch:{}]",
+                    cfg.settings.proxy_llm,
+                    cfg.settings.proxy_web_search,
+                    cfg.settings.proxy_fetch
+                )
+            } else {
+                String::new()
+            }
+        };
+
         div()
             .flex()
             .items_center()
@@ -552,6 +832,10 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_4()
+                    .children(busy.then(|| SharedString::from("● AI busy")))
+                    .child(SharedString::from(format!("{:?}", mode)))
+                    .child(SharedString::from(model))
+                    .children((!proxy.is_empty()).then(|| SharedString::from(proxy)))
                     .child(if dirty { "● modified" } else { "" })
                     .child(language)
                     .child(cursor_info),
@@ -634,7 +918,12 @@ fn render_tree_node(
     div().flex().flex_col().child(row).children(children).into_any_element()
 }
 
-fn make_editor(path: Option<PathBuf>, cx: &mut Context<Workspace>) -> Entity<EditorPane> {
+fn make_editor(
+    path: Option<PathBuf>,
+    hub: &Arc<AiHub>,
+    ai_tx: futures::channel::mpsc::UnboundedSender<UiEvent>,
+    cx: &mut Context<Workspace>,
+) -> Entity<EditorPane> {
     let doc = match path {
         Some(p) => match Document::open(p) {
             Ok(doc) => doc,
@@ -643,5 +932,5 @@ fn make_editor(path: Option<PathBuf>, cx: &mut Context<Workspace>) -> Entity<Edi
         None => Document::new_empty(),
     };
     let doc_entity = cx.new(|_| doc);
-    cx.new(|cx| EditorPane::new(doc_entity, cx))
+    cx.new(|cx| EditorPane::new(doc_entity, cx).with_ai(hub.clone(), ai_tx))
 }

@@ -1,11 +1,15 @@
+pub mod ai;
+pub mod completion;
 pub mod document;
 pub mod editor;
+pub mod panels;
 pub mod syntax;
 pub mod theme;
 pub mod workspace;
 
 use std::path::PathBuf;
 
+use futures::StreamExt;
 use gpui::{point, prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 
 fn main() {
@@ -15,8 +19,19 @@ fn main() {
         editor::register_keybindings(cx);
         workspace::register_keybindings(cx);
 
+        // ---- AI hub + event channel ------------------------------------
+        let hub = match ai::AiHub::new() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("AI init failed: {e:#}");
+                cx.quit();
+                return;
+            }
+        };
+        let (ai_tx, mut ai_rx) = futures::channel::mpsc::unbounded::<ai::UiEvent>();
+
         let display_size = cx.displays().first().map(|display| display.bounds().size);
-        let window_size = size(px(1100.), px(720.));
+        let window_size = size(px(1280.), px(800.));
         let bounds = match display_size {
             Some(screen) => Bounds {
                 origin: point(
@@ -34,18 +49,36 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("ZedLite — a tiny Zed-inspired editor".into()),
+                title: Some("ZedLite — Zed-inspired AI code editor".into()),
                 ..Default::default()
             }),
             ..Default::default()
         };
 
-        cx.open_window(options, |window, cx| {
-            let workspace = cx.new(|cx| workspace::Workspace::new(startup_path, cx));
-            workspace.update(cx, |ws, cx| ws.focus_active_pane(window, cx));
-            workspace
+        let workspace_entity = cx
+            .open_window(options, |window, cx| {
+                let ws = cx.new(|cx| workspace::Workspace::new(startup_path, hub.clone(), ai_tx.clone(), cx));
+                if let Some(root_dir) = std::env::current_dir().ok() {
+                    hub.set_root(root_dir);
+                }
+                ws.update(cx, |ws, cx| ws.focus_active_pane(window, cx));
+                ws
+            })
+            .unwrap();
+
+        // ---- pump: tokio side -> GPUI side ------------------------------
+        let weak_ws = workspace_entity.downgrade();
+        cx.spawn(async move |cx| {
+            while let Some(ev) = ai_rx.next().await {
+                if weak_ws
+                    .update(cx, |ws, cx| ws.handle_ai_event(ev, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
         })
-        .unwrap();
+        .detach();
 
         cx.activate(true);
     });
