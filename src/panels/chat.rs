@@ -380,6 +380,7 @@ impl Workspace {
                     },
                 )),
         )
+    }
 }
 
 fn focus_clone_of(h: &gpui::FocusHandle) -> gpui::FocusHandle {
