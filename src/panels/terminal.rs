@@ -1,7 +1,7 @@
 //! Terminal panel: run shell commands in the workspace root and watch their
 //! output stream live. Stop kills the running process.
 
-use gpui::{div, prelude::*, px, MouseButton};
+use gpui::{div, prelude::*, px, MouseButton, SharedString};
 use std::collections::VecDeque;
 use std::sync::Arc;
 

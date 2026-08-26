@@ -495,7 +495,9 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(status, cx))
     }
+}
 
+impl Workspace {
     fn render_toolbar(
         &mut self,
         hub: Arc<AiHub>,

@@ -4,7 +4,7 @@
 //! interaction handlers are `impl Workspace` methods so they can reach both
 //! the panel state and the shared [`AiHub`].
 
-use gpui::{div, prelude::*, px, MouseButton};
+use gpui::{div, prelude::*, px, MouseButton, SharedString};
 use std::sync::Arc;
 
 use crate::ai::{AiHub, Mode, UiEvent};

@@ -1,6 +1,6 @@
 //! Memory panel: visibility + control over the hybrid memory system.
 
-use gpui::{div, prelude::*, px, MouseButton};
+use gpui::{div, prelude::*, px, MouseButton, SharedString};
 use std::sync::Arc;
 
 use crate::ai::AiHub;
