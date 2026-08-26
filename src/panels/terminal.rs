@@ -52,7 +52,7 @@ impl Workspace {
         hub: Arc<AiHub>,
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let cwd = hub.root.lock().unwrap().display().to_string();
         let running = self.term.running;
         let ws_handle = cx.entity();
@@ -131,7 +131,7 @@ impl Workspace {
                 .text_color(hex(0xb9c0cb))
                 .child(
                     div().flex().flex_col().children(lines.into_iter().map(|l| {
-                        div().whitespace_pre().child(SharedString::from(l))
+                        div().child(SharedString::from(l))
                     })),
                 ),
         );
@@ -154,17 +154,19 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, _: &mut gpui::App| {
                     window.focus(&input_focus.clone());
                 })
-                .on_key_down(move |ws: &mut Workspace, ev: &gpui::KeyDownEvent, _, cx| {
-                    let was_running = ws.term.running;
-                    let enter = (!was_running) && ws.term.input.on_key(ev);
-                    if enter {
-                        let text = ws.term.input.take();
-                        if !text.trim().is_empty() {
-                            ws.run_terminal(text);
+                .on_key_down(cx.listener(
+                    move |ws: &mut Workspace, ev: &gpui::KeyDownEvent, _, cx| {
+                        let was_running = ws.term.running;
+                        let enter = (!was_running) && ws.term.input.on_key(ev);
+                        if enter {
+                            let text = ws.term.input.take();
+                            if !text.trim().is_empty() {
+                                ws.run_terminal(text);
+                            }
                         }
-                    }
-                    cx.notify();
-                })
+                        cx.notify();
+                    },
+                ))
                 .child(
                     div()
                         .text_size(px(12.0))

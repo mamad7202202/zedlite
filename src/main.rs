@@ -55,19 +55,21 @@ fn main() {
             ..Default::default()
         };
 
-        let workspace_entity = cx
-            .open_window(options, |window, cx| {
-                let ws = cx.new(|cx| workspace::Workspace::new(startup_path, hub.clone(), ai_tx.clone(), cx));
-                if let Some(root_dir) = std::env::current_dir().ok() {
-                    hub.set_root(root_dir);
-                }
-                ws.update(cx, |ws, cx| ws.focus_active_pane(window, cx));
-                ws
+        let ws_entity = cx.new(|cx| workspace::Workspace::new(startup_path, hub.clone(), ai_tx.clone(), cx));
+        if let Some(root_dir) = std::env::current_dir().ok() {
+            hub.set_root(root_dir);
+        }
+        let workspace_entity = {
+            let ws_clone = ws_entity.clone();
+            cx.open_window(options, move |window, cx| {
+                ws_clone.update(cx, |ws, cx| ws.focus_active_pane(window, cx));
+                ws_clone
             })
-            .unwrap();
+            .unwrap()
+        };
 
         // ---- pump: tokio side -> GPUI side ------------------------------
-        let weak_ws = workspace_entity.downgrade();
+        let weak_ws = ws_entity.downgrade();
         cx.spawn(async move |cx| {
             while let Some(ev) = ai_rx.next().await {
                 if weak_ws

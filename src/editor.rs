@@ -126,7 +126,7 @@ impl EditorPane {
 
     /// Central mutation wrapper: every edit clears stale suggestions.
     fn edit(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Document)) {
-        self.doc.update(cx, f);
+        self.doc.update(cx, |doc, _| f(doc));
         self.clear_ghosts();
     }
 

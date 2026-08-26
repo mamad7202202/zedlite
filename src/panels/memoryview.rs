@@ -22,7 +22,7 @@ impl Workspace {
         hub: Arc<AiHub>,
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let engine_graph = hub.cfg.lock().unwrap().settings.graph_memory();
         let facts_total = hub.memory.lock().unwrap().all().len();
         let session_id = hub.current_session_id();
@@ -175,13 +175,13 @@ fn stat(label: &str, value: &str) -> gpui::Div {
             div()
                 .text_size(px(13.0))
                 .text_color(hex(Theme::TEXT))
-                .child(SharedString::from(value)),
+                .child(SharedString::from(value.to_owned())),
         )
         .child(
             div()
                 .text_size(px(9.5))
                 .text_color(hex(Theme::TEXT_DIM))
-                .child(SharedString::from(label)),
+                .child(SharedString::from(label.to_owned())),
         )
 }
 

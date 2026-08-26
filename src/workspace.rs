@@ -199,7 +199,7 @@ impl Workspace {
         }
     }
 
-    fn active_pane_entity(&self) -> Option<Entity<EditorPane>> {
+    pub fn active_pane_entity(&self) -> Option<Entity<EditorPane>> {
         self.panes.get(self.active_pane).cloned()
     }
 
@@ -213,7 +213,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_file_in(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub fn open_file_in(&mut self, path: &Path, cx: &mut Context<Self>) {
         if !path.is_file() {
             self.status_message = format!("Not a file: {}", path.display());
             cx.notify();
@@ -263,7 +263,7 @@ impl Workspace {
     }
 
     fn new_file(&mut self, cx: &mut Context<Self>) {
-        let pane = make_editor(None, cx);
+        let pane = make_editor(None, &self.hub, self.ai_tx.clone(), cx);
         self.panes.push(pane);
         self.active_pane = self.panes.len() - 1;
         self.status_message = "New untitled buffer".to_string();
@@ -504,7 +504,7 @@ impl Workspace {
         ws: Entity<Self>,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let busy = hub.busy();
         let mut bar = div()
             .id("toolbar")

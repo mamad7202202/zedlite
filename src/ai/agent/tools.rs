@@ -539,11 +539,9 @@ async fn fetch_impl(url: &str, client: reqwest::Client) -> Result<String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         bail!("only http(s) URLs are supported");
     }
-    let client = client
-        .user_agent(concat!("zedlite/", env!("CARGO_PKG_VERSION")))
+    let resp = client.get(url)
         .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-    let resp = client.get(url).send().await.context("request failed")?;
+        .send().await.context("request failed")?;
     let status = resp.status();
     let headers = format!(
         "status: {}\ncontent-type: {}\n\n",
@@ -559,17 +557,10 @@ async fn fetch_impl(url: &str, client: reqwest::Client) -> Result<String> {
 
 /// Keyless web search via DuckDuckGo's HTML endpoint.
 async fn web_search_impl(query: &str, client: reqwest::Client) -> Result<String> {
-    let client = client
-        .user_agent(concat!(
-            "Mozilla/5.0 (compatible; zedlite/",
-            env!("CARGO_PKG_VERSION"),
-            ")"
-        ))
-        .timeout(std::time::Duration::from_secs(12))
-        .build()?;
     let html = client
         .post("https://html.duckduckgo.com/html/")
         .form(&[("q", query)])
+        .timeout(std::time::Duration::from_secs(12))
         .send()
         .await
         .context("search request failed")?

@@ -20,6 +20,7 @@ pub enum ChatMsg {
     System(String),
 }
 
+#[derive(Clone)]
 pub struct PendingApproval {
     pub id: u64,
     pub tool: String,
@@ -149,7 +150,7 @@ impl Workspace {
         hub: Arc<AiHub>,
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui::Stateful<gpui::Div> {
         let mode = hub.current_mode();
         let busy = hub.busy();
 
@@ -200,7 +201,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .children(msgs.into_iter().enumerate().map(|(i, m)| bubble(i, m)))
+                .children(msgs.into_iter().enumerate().map(|(i, m)| bubble(i, &m)))
                 .children((!streaming.is_empty()).then(|| {
                     div()
                         .max_w_full()
@@ -337,18 +338,20 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, move |_, window: &mut gpui::Window, _| {
                     window.focus(&focus_clone_of(&input_focus));
                 })
-                .on_key_down(move |ws: &mut Workspace, ev: &gpui::KeyDownEvent, _, cx| {
-                    let enter = ws.chat.input.on_key(ev);
-                    if enter {
-                        let text = ws.chat.input.take();
-                        if !text.trim().is_empty() {
-                            ws.submit_chat(text.clone());
-                            let tx = ws.ai_tx.clone();
-                            key_hub.send_prompt(&text, tx);
+                .on_key_down(cx.listener(
+                    move |ws: &mut Workspace, ev: &gpui::KeyDownEvent, _, cx| {
+                        let enter = ws.chat.input.on_key(ev);
+                        if enter {
+                            let text = ws.chat.input.take();
+                            if !text.trim().is_empty() {
+                                ws.submit_chat(text.clone());
+                                let tx = ws.ai_tx.clone();
+                                key_hub.send_prompt(&text, tx);
+                            }
                         }
-                    }
-                    cx.notify();
-                })
+                        cx.notify();
+                    },
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -451,7 +454,7 @@ fn align_end(_ix: usize, bg: gpui::Hsla, fg: gpui::Hsla, text: &str) -> gpui::An
         .text_size(px(12.0))
         .line_height(px(17.0))
         .text_color(fg)
-        .child(SharedString::from(text))
+        .child(SharedString::from(text.to_owned()))
         .into_any_element()
 }
 

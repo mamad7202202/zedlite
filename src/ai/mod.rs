@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod session;
 
 use anyhow::{Context as _, Result};
+use tokio::io::AsyncBufReadExt;
 use futures::channel::mpsc::UnboundedSender;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -323,7 +324,7 @@ impl AiHub {
         });
     }
 
-    fn open_session_and_log_user(&mut self, text: &str) -> Result<()> {
+    fn open_session_and_log_user(&self, text: &str) -> Result<()> {
         let needs_new = self.session.lock().unwrap().is_none();
         if needs_new {
             let model = self
