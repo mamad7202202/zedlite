@@ -193,6 +193,7 @@ impl Workspace {
                     });
                 })),
         )
+    }
 }
 
 pub const TERMINAL_H: f32 = 230.0;

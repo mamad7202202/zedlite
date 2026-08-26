@@ -160,8 +160,9 @@ impl Workspace {
                             .line_height(px(15.0))
                             .text_color(hex(0xaab2bf))
                             .child(SharedString::from(graph_preview)),
-                    ),
-            )
+                     ),
+             )
+    }
 }
 
 fn stat(label: &str, value: &str) -> gpui::Div {
